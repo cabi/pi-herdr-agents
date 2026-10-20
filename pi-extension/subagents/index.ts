@@ -55,8 +55,10 @@ import {
 	parseExactModelRef,
 	resolveRuntimePlan,
 	resolveRuntimePlans,
+	scopeModelRegistryAdapter,
 	THINKING_LEVELS,
 	isThinkingLevel,
+	type ModelRegistryAdapter,
 	type ResolvedRuntimePlan,
 	type ThinkingLevel,
 } from "../../maestro/core/routing.ts";
@@ -1988,6 +1990,7 @@ export const __test__ = {
 	formatNoProgressAdvisoryLine,
 	resolveDenyTools,
 	buildSubagentRoutingGuidelines,
+	sessionModelRegistry,
 	resolveInterruptTarget,
 	requestSubagentInterrupt,
 	handleSubagentInterrupt,
@@ -2113,6 +2116,22 @@ function normalizePiAttempt(
 		identity: { id: logicalId, logicalId, generationId, taskId },
 	};
 }
+// Scoped sessions (--models / enabledModels) resolve every model selection —
+// task shortlists, exact refs, fallback alternatives — against the session's
+// scoped set: out-of-scope models are invisible to spawn-time resolution.
+function sessionModelRegistry(
+	ctx: Parameters<typeof normalizePiAttempt>[1] & {
+		scopedModels?: readonly { model: { provider: string; id: string } }[];
+	},
+): ModelRegistryAdapter {
+	const registry = wrapPiModelRegistry(ctx.modelRegistry);
+	const scopedModels = (ctx.scopedModels ?? []).map((entry) => entry.model);
+	if (scopedModels.length === 0) return registry;
+	return scopeModelRegistryAdapter(
+		registry,
+		new Set(scopedModels.map((model) => `${model.provider}/${model.id}`)),
+	);
+}
 
 /**
  * Watch a launched subagent until it exits. Polls for completion, extracts
@@ -2146,7 +2165,7 @@ function resolveSubagentRuntimePlans(
 			modelId: ctx.model.id,
 			thinking: parentThinking,
 		},
-		wrapPiModelRegistry(ctx.modelRegistry),
+		sessionModelRegistry(ctx),
 		modelConfig.tasks,
 		!!params.worktree,
 	);
@@ -2175,7 +2194,7 @@ function launchSnapshot(
 			ctx.model && thinking
 				? { provider: ctx.model.provider, modelId: ctx.model.id, thinking }
 				: undefined,
-		modelRegistry: wrapPiModelRegistry(ctx.modelRegistry),
+		modelRegistry: sessionModelRegistry(ctx),
 		paneConfig,
 	};
 }
@@ -2559,18 +2578,14 @@ export default function subagentsExtension(
 			for (const message of roleConfig.deprecations)
 				ctx.ui.notify(message, "warning");
 		}
-		const registry = wrapPiModelRegistry(ctx.modelRegistry);
-		// Scoped sessions (--models / enabledModels) must not advertise models
-		// the session cannot select: list the scoped set instead of the
-		// truncated authenticated snapshot.
+		// Scoped sessions (--models / enabledModels) advertise only the scoped
+		// set: sessionModelRegistry hides out-of-scope models from the catalog
+		// and its task shortlists alike.
+		const registry = sessionModelRegistry(ctx);
 		const scopedModels = (ctx.scopedModels ?? []).map((entry) => entry.model);
-		const scopedRefs = new Set(
-			scopedModels.map((model) => `${model.provider}/${model.id}`),
-		);
 		const authenticatedTaskPreferences = getAuthenticatedTaskPreferences(
 			registry,
 			modelConfig.tasks,
-			scopedModels.length > 0 ? scopedRefs : undefined,
 		);
 		runtime.modelCatalog =
 			scopedModels.length > 0
@@ -3601,7 +3616,7 @@ export default function subagentsExtension(
 						modelId: ctx.model.id,
 						thinking,
 					},
-					wrapPiModelRegistry(ctx.modelRegistry),
+					sessionModelRegistry(ctx),
 				);
 				const result = await runtime.session!.handoffWorktree({
 					name: `wt: ${branch}`,
@@ -3619,7 +3634,7 @@ export default function subagentsExtension(
 							agentDir: getAgentConfigDir(),
 						},
 						paneConfig,
-						modelRegistry: wrapPiModelRegistry(ctx.modelRegistry),
+						modelRegistry: sessionModelRegistry(ctx),
 					},
 				});
 				const worktree = result.record.worktree;
